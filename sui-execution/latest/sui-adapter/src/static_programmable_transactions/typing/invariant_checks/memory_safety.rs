@@ -58,6 +58,7 @@ struct Location {
 
 #[derive(Debug)]
 struct Context {
+    allow_references_in_ptbs: bool,
     tx_context: Location,
     gas: Location,
     object_inputs: Vec<Location>,
@@ -292,7 +293,7 @@ impl Location {
 }
 
 impl Context {
-    fn new<Mode: ExecutionMode>(_env: &Env<Mode>, txn: &T::Transaction) -> anyhow::Result<Self> {
+    fn new<Mode: ExecutionMode>(env: &Env<Mode>, txn: &T::Transaction) -> anyhow::Result<Self> {
         let T::Transaction {
             gas_payment,
             bytes: _,
@@ -339,6 +340,7 @@ impl Context {
             })
             .collect::<Result<_, ExecutionError>>()?;
         Ok(Self {
+            allow_references_in_ptbs: env.protocol_config.allow_references_in_ptbs(),
             tx_context,
             gas,
             object_inputs,
@@ -466,10 +468,16 @@ impl Context {
             | T::Argument__::Read(usage) => self.check_usage(usage, location)?,
             T::Argument__::Borrow(_, _) => (),
         };
+        // Copy the flag out before the &mut self reborrow below.
+        let allow_references_in_ptbs = self.allow_references_in_ptbs;
         let location = self.location_mut(arg.location())?;
         let value = match arg {
             T::Argument__::Use(usage) => location.use_(usage)?,
             T::Argument__::Freeze(usage) => location.use_(usage)?.freeze()?,
+            // Mirrors verify::memory_safety: TxContext is outside the model.
+            T::Argument__::Borrow(_, T::Location::TxContext) if allow_references_in_ptbs => {
+                Value::NonRef
+            }
             T::Argument__::Borrow(is_mut, _) => location.borrow(*is_mut)?,
             T::Argument__::Read(usage) => {
                 location.use_(usage)?;
@@ -497,6 +505,7 @@ impl Context {
 
     fn all_references(&self) -> impl Iterator<Item = Rc<PathSet>> {
         let Self {
+            allow_references_in_ptbs: _,
             tx_context,
             gas,
             object_inputs,

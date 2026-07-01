@@ -31,10 +31,12 @@ type Paths = move_regex_borrow_graph::collections::Paths<(), Location>;
 #[must_use]
 enum Value {
     Ref(Ref),
+    TxContextRef,
     NonRef,
 }
 
 struct Context {
+    allow_references_in_ptbs: bool,
     graph: Graph,
     local_root: Ref,
     tx_context: Option<Value>,
@@ -49,14 +51,14 @@ struct Context {
 impl Value {
     fn is_ref(&self) -> bool {
         match self {
-            Value::Ref(_) => true,
+            Value::Ref(_) | Value::TxContextRef => true,
             Value::NonRef => false,
         }
     }
 
     fn is_non_ref(&self) -> bool {
         match self {
-            Value::Ref(_) => false,
+            Value::Ref(_) | Value::TxContextRef => false,
             Value::NonRef => true,
         }
     }
@@ -64,14 +66,14 @@ impl Value {
     fn to_ref(&self) -> Option<Ref> {
         match self {
             Value::Ref(r) => Some(*r),
-            Value::NonRef => None,
+            Value::TxContextRef | Value::NonRef => None,
         }
     }
 }
 
 impl Context {
     fn new<Mode: ExecutionMode>(
-        _env: &Env<Mode>,
+        env: &Env<Mode>,
         ast: &T::Transaction,
     ) -> Result<Self, Mode::Error> {
         let gas_coin = if ast.gas_payment.is_none() {
@@ -112,6 +114,7 @@ impl Context {
             )
             .map_err(graph_meter_err::<Mode::Error>)?;
         Ok(Self {
+            allow_references_in_ptbs: env.protocol_config.allow_references_in_ptbs(),
             graph,
             local_root,
             tx_context: Some(Value::NonRef),
@@ -415,7 +418,7 @@ fn consume_value_opt<E: ExecutionErrorTrait>(
 
 fn consume_value<E: ExecutionErrorTrait>(context: &mut Context, value: Value) -> Result<(), E> {
     match value {
-        Value::NonRef => Ok(()),
+        Value::NonRef | Value::TxContextRef => Ok(()),
         Value::Ref(r) => {
             context.release::<E>(r)?;
             Ok(())
@@ -491,6 +494,9 @@ fn copy_value<E: ExecutionErrorTrait>(
             Value::Ref(new_r)
         }
         Value::NonRef => Value::NonRef,
+        Value::TxContextRef => {
+            invariant_violation!("type checking should prevent copying a TxContext reference")
+        }
     })
 }
 
@@ -512,6 +518,10 @@ fn borrow_location<E: ExecutionErrorTrait>(
         value.is_non_ref(),
         "type checking should guarantee no borrowing of references"
     );
+    // Under the flag, TxContext lives outside the borrow graph.
+    if context.allow_references_in_ptbs && matches!(l, T::Location::TxContext) {
+        return Ok(Value::TxContextRef);
+    }
     let new_r = context.extend_by_label::<E>(context.local_root, is_mut, l)?;
     Ok(Value::Ref(new_r))
 }
@@ -591,7 +601,9 @@ fn call<E: ExecutionErrorTrait>(
             .iter()
             .zip_debug_eq(&signature.parameters)
             .enumerate()
-            .find(|(_, (x, ty))| x.to_ref() == Some(v) && matches!(ty, Type::Reference(true, _)));
+            .find(|(_, (x, ty))| {
+                x.to_ref() == Some(v) && matches!(ty, Type::Reference(true, _))
+            });
 
         let Some((idx, _)) = mut_idx else {
             invariant_violation!("non transferrable value was not found in arguments");
