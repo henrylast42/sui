@@ -32,7 +32,7 @@ use tracing::{info, warn};
 
 /// The minimum and maximum protocol versions supported by this build.
 const MIN_PROTOCOL_VERSION: u64 = 1;
-const MAX_PROTOCOL_VERSION: u64 = 130;
+const MAX_PROTOCOL_VERSION: u64 = 131;
 
 const TESTNET_USDC: &str =
     "0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC";
@@ -367,6 +367,9 @@ const MAINNET_USDB: &str =
 //              Add the `sui::scratch` per-transaction ephemeral store and its native costs.
 //              Enable zklogin v2 verify (with v1 fallback) for devnet only.
 //              Add an epoch close deadline failsafe for deferred transactions.
+// Version 131: Enable tx_context_restrictions_verifier: reject function
+//              signatures with `&mut TxContext` + a `&mut T` return
+//              (T != TxContext) that have no non-TxContext `&mut U` parameter.
 
 #[derive(Copy, Clone, Debug, Hash, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProtocolVersion(u64);
@@ -1018,6 +1021,12 @@ struct FeatureFlags {
     // If true, allow Move functions called in PTBs to return references
     #[serde(skip_serializing_if = "is_false")]
     allow_references_in_ptbs: bool,
+
+    // If true, the tx_context_restrictions_verifier pass runs at Move module
+    // publish time and rejects signatures with `&mut TxContext` + a `&mut T`
+    // return (T != TxContext) that have no non-TxContext `&mut U` parameter.
+    #[serde(skip_serializing_if = "is_false")]
+    check_tx_context_restrictions: bool,
 
     // Enable display registry protocol
     #[serde(skip_serializing_if = "is_false")]
@@ -4529,6 +4538,9 @@ impl ProtocolConfig {
                         cfg.feature_flags.zklogin_circuit_mode = 1;
                     }
                 }
+                131 => {
+                    cfg.feature_flags.check_tx_context_restrictions = true;
+                }
                 // Use this template when making changes:
                 //
                 //     // modify an existing constant.
@@ -4639,6 +4651,7 @@ impl ProtocolConfig {
             deprecate_global_storage_ops,
             disable_entry_point_signature_check: self.disable_entry_point_signature_check(),
             switch_to_regex_reference_safety: false,
+            check_tx_context_restrictions: self.check_tx_context_restrictions(),
             disallow_jump_orphans: self.disallow_jump_orphans(),
         }
     }
