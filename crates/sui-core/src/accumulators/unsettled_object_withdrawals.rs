@@ -9,9 +9,11 @@ use std::{
 use parking_lot::RwLock;
 use sui_types::{
     SUI_ACCUMULATOR_ROOT_OBJECT_ID,
-    accumulator_root::AccumulatorObjId,
+    accumulator_root::{AccumulatorObjId, UnsettledObjectFundsRead},
     base_types::SequenceNumber,
     effects::{TransactionEffects, TransactionEffectsAPI},
+    executable_transaction::VerifiedExecutableTransaction,
+    transaction::TransactionDataAPI,
 };
 
 use crate::{
@@ -24,8 +26,11 @@ use crate::{
 /// balance read bounded by an accumulator version must additionally account for the withdrawals
 /// recorded here at that version.
 ///
-/// The post-execution [`ObjectFundsChecker`] checks and records withdrawals through this store.
-/// Entries are garbage-collected at checkpoint commit once their accumulator version has settled.
+/// Two consumers share this store: the in-execution sufficiency check (the Move VM reads it
+/// through [`UnsettledObjectFundsRead`] and records through [`Self::record_object_funds_withdraws`]
+/// after a successful execution), and the post-execution [`ObjectFundsChecker`] path (which checks
+/// and records through its own logic). Entries are garbage-collected at checkpoint commit once
+/// their accumulator version has settled.
 ///
 /// [`ObjectFundsChecker`]: crate::accumulators::object_funds_checker::ObjectFundsChecker
 pub struct UnsettledObjectWithdrawals {
@@ -49,6 +54,20 @@ struct Inner {
     /// unused entries in unsettled_withdraws that are now fully committed. Without doing so unsettled_withdraws
     /// may grow unbounded.
     unsettled_accounts: BTreeMap<SequenceNumber, BTreeSet<AccumulatorObjId>>,
+}
+
+impl UnsettledObjectFundsRead for UnsettledObjectWithdrawals {
+    fn get_unsettled_object_withdraw(
+        &self,
+        account: &AccumulatorObjId,
+        accumulator_version: SequenceNumber,
+    ) -> u128 {
+        UnsettledObjectWithdrawals::get_unsettled_object_withdraw(
+            self,
+            account,
+            accumulator_version,
+        )
+    }
 }
 
 impl UnsettledObjectWithdrawals {
@@ -75,10 +94,50 @@ impl UnsettledObjectWithdrawals {
             .unwrap_or_default()
     }
 
+    /// Records the object-funds withdrawals of a transaction that executed successfully under the
+    /// in-execution funds check, so subsequent transactions in the same consensus commit see them as
+    /// unsettled. This is the recording half of the post-execution checker's check-then-record,
+    /// without the sufficiency check, which the Move VM already performed during execution. Entries
+    /// are garbage-collected by `commit_effects` once the accumulator version settles.
+    pub fn record_object_funds_withdraws(
+        &self,
+        certificate: &VerifiedExecutableTransaction,
+        effects: &TransactionEffects,
+        accumulator_running_max_withdraws: &BTreeMap<AccumulatorObjId, u128>,
+        accumulator_version: SequenceNumber,
+        epoch_store: &Arc<AuthorityPerEpochStore>,
+    ) {
+        if accumulator_running_max_withdraws.is_empty() {
+            return;
+        }
+        // Address-reservation withdraws are settled separately; only object withdraws (those without
+        // a funds reservation) are tracked here, mirroring the post-execution checker.
+        let address_funds_reservations: BTreeSet<_> = certificate
+            .transaction_data()
+            .process_funds_withdrawals_for_execution(epoch_store.get_chain_identifier())
+            .into_keys()
+            .collect();
+        let object_running_max_withdraws: BTreeMap<_, _> = accumulator_running_max_withdraws
+            .iter()
+            .filter(|(account, _)| !address_funds_reservations.contains(*account))
+            .map(|(account, amount)| (*account, *amount))
+            .collect();
+        // Record the same amount the post-execution checker would: net withdraws (what settlement
+        // deducts) under `record_net_unsettled_object_withdraws`, else the running max.
+        let updates = self.compute_unsettled_withdraw_updates(
+            effects,
+            &address_funds_reservations,
+            &object_running_max_withdraws,
+            epoch_store,
+        );
+        self.record_unsettled_withdraws(updates.iter(), accumulator_version);
+    }
+
     /// The per-account amounts to record as unsettled withdraws: net withdraws from the effects
     /// (what settlement will actually deduct) when `record_net_unsettled_object_withdraws` is
     /// enabled, otherwise the running max. Address-reservation accounts are excluded (settled
-    /// separately).
+    /// separately). Shared by the post-execution checker and the in-execution recording path
+    /// (`record_object_funds_withdraws`) so both record identically.
     pub(crate) fn compute_unsettled_withdraw_updates(
         &self,
         effects: &TransactionEffects,

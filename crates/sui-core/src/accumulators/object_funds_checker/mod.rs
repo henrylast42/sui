@@ -45,11 +45,12 @@ pub enum ObjectFundsWithdrawStatus {
     Pending(oneshot::Receiver<FundsWithdrawStatus>),
 }
 
-/// The post-execution object-funds sufficiency checker: decides after execution whether a
+/// The post-execution object-funds sufficiency checker. Used only when the in-execution check
+/// (`check_object_funds_withdraw_in_execution`) is disabled: it decides after execution whether a
 /// transaction's object withdrawals are covered, waiting for settlement when the answer is not yet
-/// deterministic. The unsettled-withdrawal bookkeeping lives in [`UnsettledObjectWithdrawals`];
-/// this type holds only the checking logic and the settlement-version watch that its pending-wait
-/// machinery needs.
+/// deterministic. The unsettled-withdrawal bookkeeping both paths share lives in
+/// [`UnsettledObjectWithdrawals`]; this type holds only the checking logic and the
+/// settlement-version watch that its pending-wait machinery needs.
 pub struct ObjectFundsChecker {
     /// Watchers to keep track the last settled accumulator version.
     /// This is updated whenever the settlement barrier transaction is executed.
