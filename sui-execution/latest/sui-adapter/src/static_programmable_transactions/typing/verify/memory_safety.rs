@@ -601,9 +601,7 @@ fn call<E: ExecutionErrorTrait>(
             .iter()
             .zip_debug_eq(&signature.parameters)
             .enumerate()
-            .find(|(_, (x, ty))| {
-                x.to_ref() == Some(v) && matches!(ty, Type::Reference(true, _))
-            });
+            .find(|(_, (x, ty))| x.to_ref() == Some(v) && matches!(ty, Type::Reference(true, _)));
 
         let Some((idx, _)) = mut_idx else {
             invariant_violation!("non transferrable value was not found in arguments");
