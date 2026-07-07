@@ -370,6 +370,7 @@ pub async fn start_rpc(
     let watermark_task = WatermarkTask::new(
         config.watermark,
         pg_pipelines,
+        config.availability,
         pg_reader.clone(),
         bigtable_reader,
         ledger_grpc_reader.clone(),
