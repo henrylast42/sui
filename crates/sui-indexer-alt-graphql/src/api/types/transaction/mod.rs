@@ -42,6 +42,7 @@ use crate::api::scalars::json::Json;
 use crate::api::scalars::sui_address::SuiAddress;
 use crate::api::types::address::Address;
 use crate::api::types::available_range::AvailableRangeKey;
+use crate::api::types::available_range::require_pipeline;
 use crate::api::types::epoch::Epoch;
 use crate::api::types::gas_input::GasInput;
 use crate::api::types::lookups::CheckpointBounds;
@@ -432,6 +433,8 @@ impl TransactionContents {
         let Some(checkpoint_viewed_at) = self.scope.checkpoint_viewed_at() else {
             return Ok(self.clone());
         };
+
+        require_pipeline(ctx, "kv_transactions")?;
 
         let kv_loader: &KvLoader = ctx.data()?;
         let Some(transaction) = kv_loader
