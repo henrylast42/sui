@@ -388,7 +388,7 @@ fn location<Mode: ExecutionMode>(
     l: T::Location,
 ) -> anyhow::Result<T::Type> {
     Ok(match l {
-        T::Location::TxContext => env.tx_context_type()?,
+        T::Location::TxContext(_) => env.tx_context_type()?,
         T::Location::GasCoin => env.gas_coin_type()?,
         T::Location::ObjectInput(i) => context
             .objects

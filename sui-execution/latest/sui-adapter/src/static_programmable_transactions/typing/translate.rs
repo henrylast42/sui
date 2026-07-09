@@ -57,6 +57,9 @@ struct Context {
         IndexMap<T::Location, T::WithdrawalCompatibilityConversion>,
     original_command_len: usize,
     commands: Vec<T::Command>,
+    /// The number of injected `TxContext` arguments, used to mint a unique location per
+    /// injection when references are allowed in PTBs
+    tx_context_uses: u32,
 }
 
 impl Context {
@@ -79,6 +82,7 @@ impl Context {
             withdrawal_compatibility_conversions: IndexMap::new(),
             receiving: IndexMap::new(),
             commands: vec![],
+            tx_context_uses: 0,
         };
         // clone inputs for debug assertions
         #[cfg(debug_assertions)]
@@ -191,6 +195,26 @@ impl Context {
         Ok(())
     }
 
+    /// The location for an injected `TxContext` argument. When references are allowed in PTBs,
+    /// each injection gets a unique location so that each borrow of the transaction context has
+    /// its own root in reference safety, allowing the borrows to coexist.
+    fn tx_context_location<Mode: ExecutionMode>(
+        &mut self,
+        env: &Env<Mode>,
+    ) -> Result<T::Location, ExecutionError> {
+        let idx = if env.protocol_config.allow_references_in_ptbs() {
+            let idx = self.tx_context_uses;
+            let Some(next) = idx.checked_add(1) else {
+                invariant_violation!("Too many TxContext usages in transaction");
+            };
+            self.tx_context_uses = next;
+            idx
+        } else {
+            0
+        };
+        Ok(T::Location::TxContext(idx))
+    }
+
     fn result_type(&self, i: u16) -> Option<&T::ResultType> {
         self.commands.get(i as usize).map(|c| &c.value.result_type)
     }
@@ -201,7 +225,7 @@ impl Context {
         location: T::Location,
     ) -> Result<Option<Type>, Mode::Error> {
         Ok(Some(match location {
-            T::Location::TxContext => env.tx_context_type()?,
+            T::Location::TxContext(_) => env.tx_context_type()?,
             T::Location::GasCoin => env.gas_coin_type()?,
             T::Location::Result(i, j) => {
                 let Some(tys) = self.result_type(i) else {
@@ -587,7 +611,7 @@ fn move_call_arguments<Mode: ExecutionMode>(
                     // TODO this might overlap or be  out of bounds of the original PTB arguments...
                     // what do we do here?
                     let idx = checked_as!(param_idx, u16)?;
-                    let arg__ = T::Argument__::Borrow(is_mut, T::Location::TxContext);
+                    let arg__ = T::Argument__::Borrow(is_mut, context.tx_context_location(env)?);
                     let ty = Type::Reference(is_mut, Rc::new(env.tx_context_type()?));
                     sp(idx, (arg__, ty))
                 }
@@ -1029,7 +1053,7 @@ fn convert_withdrawal_to_coin<Mode: ExecutionMode>(
     // insert a conversion command
     let withdrawal_arg_ = T::Argument__::new_move(location);
     let withdrawal_arg = sp(idx, (withdrawal_arg_, withdrawal_ty));
-    let ctx_arg_ = T::Argument__::Borrow(true, T::Location::TxContext);
+    let ctx_arg_ = T::Argument__::Borrow(true, context.tx_context_location(env)?);
     let ctx_ty = Type::Reference(true, Rc::new(env.tx_context_type()?));
     let ctx_arg = sp(idx, (ctx_arg_, ctx_ty));
     let conversion_command__ = T::Command__::MoveCall(Box::new(T::MoveCall {
@@ -1384,7 +1408,7 @@ mod post_execution_checks {
     ) -> Result<bool, ExecutionError> {
         Ok(match arg_.location() {
             // no shared/party objects in these locations
-            T::Location::TxContext
+            T::Location::TxContext(_)
             | T::Location::GasCoin
             | T::Location::WithdrawalInput(_)
             | T::Location::PureInput(_)

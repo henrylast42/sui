@@ -132,7 +132,7 @@ impl Context {
         l: T::Location,
     ) -> Result<&mut Option<Value>, E> {
         Ok(match l {
-            T::Location::TxContext => &mut self.tx_context,
+            T::Location::TxContext(_) => &mut self.tx_context,
             T::Location::GasCoin => &mut self.gas_coin,
             T::Location::ObjectInput(i) => self.objects.safe_get_mut(i as usize)?,
             T::Location::WithdrawalInput(i) => self.withdrawals.safe_get_mut(i as usize)?,
@@ -518,8 +518,11 @@ fn borrow_location<E: ExecutionErrorTrait>(
         value.is_non_ref(),
         "type checking should guarantee no borrowing of references"
     );
-    // Under the flag, TxContext lives outside the borrow graph.
-    if context.allow_references_in_ptbs && matches!(l, T::Location::TxContext) {
+    // Under the flag, TxContext lives outside the borrow graph. This is sound since each
+    // injected TxContext argument has a unique location (see `T::Location::TxContext`), and
+    // `invariant_checks::memory_safety` double-checks this by fully tracking each of those
+    // locations as a distinct borrow root.
+    if context.allow_references_in_ptbs && matches!(l, T::Location::TxContext(_)) {
         return Ok(Value::TxContextRef);
     }
     let new_r = context.extend_by_label::<E>(context.local_root, is_mut, l)?;
@@ -670,7 +673,7 @@ fn graph_err<E: ExecutionErrorTrait>(e: move_regex_borrow_graph::InvariantViolat
 impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            T::Location::TxContext => write!(f, "TxContext"),
+            T::Location::TxContext(idx) => write!(f, "TxContext({idx})"),
             T::Location::GasCoin => write!(f, "GasCoin"),
             T::Location::ObjectInput(idx) => write!(f, "ObjectInput({idx})"),
             T::Location::WithdrawalInput(idx) => write!(f, "WithdrawalInput({idx})"),

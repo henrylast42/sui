@@ -154,7 +154,11 @@ pub struct MoveCall {
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum Location {
-    TxContext,
+    /// The transaction context. All indices resolve to the same runtime value. When references
+    /// are allowed in PTBs, each injected `TxContext` argument gets a unique index--and thus a
+    /// unique borrow root in reference safety--since borrows of the transaction context are
+    /// allowed to coexist. When references are not allowed, the index is always 0.
+    TxContext(u32),
     GasCoin,
     ObjectInput(u16),
     WithdrawalInput(u16),

@@ -276,7 +276,9 @@ impl Locations {
     /// dev-inspect
     fn resolve(&mut self, location: T::Location) -> Result<ResolvedLocation<'_>, ExecutionError> {
         Ok(match location {
-            T::Location::TxContext => ResolvedLocation::Local(self.tx_context_value.local(0)?),
+            // all TxContext locations resolve to the same runtime value; the index only
+            // distinguishes borrow roots for reference safety
+            T::Location::TxContext(_) => ResolvedLocation::Local(self.tx_context_value.local(0)?),
             T::Location::GasCoin => {
                 let (_, _, gas_locals) = unwrap!(self.gas.as_mut(), "Gas coin not provided");
                 ResolvedLocation::Local(gas_locals.local(0)?)
@@ -1166,7 +1168,7 @@ where
             );
             let has_otw = fparameters.0.len() == 2;
             let tx_context = self
-                .location(UsageKind::Borrow, T::Location::TxContext)
+                .location(UsageKind::Borrow, T::Location::TxContext(0))
                 .map_err(|e| {
                     make_invariant_violation!("Failed to get tx context for init function: {}", e)
                 })?;
@@ -1449,7 +1451,7 @@ where
             invariant_violation!("Failed to serialize Move value");
         };
         let arg = match location {
-            T::Location::TxContext => return Ok(None),
+            T::Location::TxContext(_) => return Ok(None),
             T::Location::GasCoin => TxArgument::GasCoin,
             T::Location::Result(i, j) => TxArgument::NestedResult(i, j),
             T::Location::ObjectInput(i) => TxArgument::Input(

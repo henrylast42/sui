@@ -310,7 +310,7 @@ fn check_obj_by_mut_ref<E: ExecutionErrorTrait>(
         T::Location::WithdrawalInput(_)
         | T::Location::PureInput(_)
         | T::Location::ReceivingInput(_)
-        | T::Location::TxContext
+        | T::Location::TxContext(_)
         | T::Location::GasCoin
         | T::Location::Result(_, _) => Ok(()),
         T::Location::ObjectInput(idx) => {
@@ -336,7 +336,7 @@ fn check_by_value<E: ExecutionErrorTrait>(
     match location {
         T::Location::GasCoin
         | T::Location::Result(_, _)
-        | T::Location::TxContext
+        | T::Location::TxContext(_)
         | T::Location::WithdrawalInput(_)
         | T::Location::PureInput(_)
         | T::Location::ReceivingInput(_) => Ok(()),
@@ -383,7 +383,7 @@ fn check_gas_by_value_loc<E: ExecutionErrorTrait>(
             idx as usize,
         )
         .into()),
-        T::Location::TxContext
+        T::Location::TxContext(_)
         | T::Location::ObjectInput(_)
         | T::Location::WithdrawalInput(_)
         | T::Location::PureInput(_)

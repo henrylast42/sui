@@ -265,7 +265,7 @@ mod verify {
             l: T::Location,
         ) -> Result<&mut Option<Value>, E> {
             Ok(match l {
-                T::Location::TxContext => &mut self.tx_context,
+                T::Location::TxContext(_) => &mut self.tx_context,
                 T::Location::GasCoin => &mut self.gas_coin,
                 T::Location::ObjectInput(i) => self.objects.safe_get_mut(i as usize)?,
                 T::Location::WithdrawalInput(i) => self.withdrawals.safe_get_mut(i as usize)?,

@@ -311,7 +311,7 @@ impl Context {
                 .results
                 .safe_get_mut(*i as usize)?
                 .safe_get_mut(*j as usize)?,
-            T::Location::TxContext => &mut self.tx_context,
+            T::Location::TxContext(_) => &mut self.tx_context,
         })
     }
 

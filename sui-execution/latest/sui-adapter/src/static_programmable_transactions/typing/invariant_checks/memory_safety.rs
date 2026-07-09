@@ -58,8 +58,11 @@ struct Location {
 
 #[derive(Debug)]
 struct Context {
-    allow_references_in_ptbs: bool,
-    tx_context: Location,
+    // One location per injected `TxContext` argument. When references are allowed in PTBs, each
+    // injection has a unique location, giving each borrow of the transaction context its own
+    // root. This fully tracks those borrows--double-checking `verify::memory_safety`, which
+    // instead omits them from the borrow graph.
+    tx_contexts: Vec<Location>,
     gas: Location,
     object_inputs: Vec<Location>,
     withdrawal_inputs: Vec<Location>,
@@ -293,7 +296,7 @@ impl Location {
 }
 
 impl Context {
-    fn new<Mode: ExecutionMode>(env: &Env<Mode>, txn: &T::Transaction) -> anyhow::Result<Self> {
+    fn new<Mode: ExecutionMode>(_env: &Env<Mode>, txn: &T::Transaction) -> anyhow::Result<Self> {
         let T::Transaction {
             gas_payment,
             bytes: _,
@@ -303,9 +306,29 @@ impl Context {
             receiving,
             withdrawal_compatibility_conversions: _,
             original_command_len: _,
-            commands: _,
+            commands,
         } = txn;
-        let tx_context = Location::non_ref(T::Location::TxContext);
+        let max_tx_context = commands
+            .iter()
+            .flat_map(|c| c.value.command.arguments())
+            .filter_map(|arg| match arg.value.0.location() {
+                T::Location::TxContext(i) => Some(i as usize),
+                _ => None,
+            })
+            .max();
+        let num_tx_contexts = match max_tx_context {
+            None => 0,
+            Some(max) => max
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("TxContext index overflow"))?,
+        };
+        let tx_contexts = (0..num_tx_contexts)
+            .map(|i| {
+                Ok(Location::non_ref(T::Location::TxContext(checked_as!(
+                    i, u32
+                )?)))
+            })
+            .collect::<Result<_, ExecutionError>>()?;
         let mut gas = Location::non_ref(T::Location::GasCoin);
         if gas_payment.is_none() {
             gas.move_value()
@@ -340,8 +363,7 @@ impl Context {
             })
             .collect::<Result<_, ExecutionError>>()?;
         Ok(Self {
-            allow_references_in_ptbs: env.protocol_config.allow_references_in_ptbs(),
-            tx_context,
+            tx_contexts,
             gas,
             object_inputs,
             withdrawal_inputs,
@@ -381,7 +403,10 @@ impl Context {
 
     fn location(&self, loc: T::Location) -> anyhow::Result<&Location> {
         Ok(match loc {
-            T::Location::TxContext => &self.tx_context,
+            T::Location::TxContext(i) => self
+                .tx_contexts
+                .get(i as usize)
+                .ok_or_else(|| anyhow::anyhow!("TxContext index out of bounds {i}"))?,
             T::Location::GasCoin => &self.gas,
             T::Location::ObjectInput(i) => self
                 .object_inputs
@@ -409,7 +434,10 @@ impl Context {
 
     fn location_mut(&mut self, loc: T::Location) -> anyhow::Result<&mut Location> {
         Ok(match loc {
-            T::Location::TxContext => &mut self.tx_context,
+            T::Location::TxContext(i) => self
+                .tx_contexts
+                .get_mut(i as usize)
+                .ok_or_else(|| anyhow::anyhow!("TxContext index out of bounds {i}"))?,
             T::Location::GasCoin => &mut self.gas,
             T::Location::ObjectInput(i) => self
                 .object_inputs
@@ -468,22 +496,16 @@ impl Context {
             | T::Argument__::Read(usage) => self.check_usage(usage, location)?,
             T::Argument__::Borrow(_, _) => (),
         };
-        let value =
-            // Mirrors verify::memory_safety: TxContext is outside the model.
-            if self.allow_references_in_ptbs && matches!(arg, T::Argument__::Borrow(_, T::Location::TxContext)) {
+        let location = self.location_mut(arg.location())?;
+        let value = match arg {
+            T::Argument__::Use(usage) => location.use_(usage)?,
+            T::Argument__::Freeze(usage) => location.use_(usage)?.freeze()?,
+            T::Argument__::Borrow(is_mut, _) => location.borrow(*is_mut)?,
+            T::Argument__::Read(usage) => {
+                location.use_(usage)?;
                 Value::NonRef
-            } else {
-                let location = self.location_mut(arg.location())?;
-                match arg {
-                    T::Argument__::Use(usage) => location.use_(usage)?,
-                    T::Argument__::Freeze(usage) => location.use_(usage)?.freeze()?,
-                    T::Argument__::Borrow(is_mut, _) => location.borrow(*is_mut)?,
-                    T::Argument__::Read(usage) => {
-                        location.use_(usage)?;
-                        Value::NonRef
-                    }
-                }
-            };
+            }
+        };
         if let Value::Ref { paths, .. } = &value {
             for p in &paths.0 {
                 match p.root {
@@ -505,8 +527,7 @@ impl Context {
 
     fn all_references(&self) -> impl Iterator<Item = Rc<PathSet>> {
         let Self {
-            allow_references_in_ptbs: _,
-            tx_context,
+            tx_contexts,
             gas,
             object_inputs,
             withdrawal_inputs,
@@ -515,7 +536,8 @@ impl Context {
             results,
             arg_roots: _,
         } = self;
-        std::iter::once(tx_context)
+        tx_contexts
+            .iter()
             .chain(std::iter::once(gas))
             .chain(object_inputs)
             .chain(withdrawal_inputs)
@@ -553,6 +575,10 @@ impl Context {
 /// not be expressive enough in the presence of control flow. Luckily, PTBs do not have control flow
 /// so we can use this approach as a safety net for the Regex based implementation until that
 /// code is sufficiently. tested and hardened.
+/// Unlike the Regex based implementation, this implementation does not special case `TxContext`
+/// borrows. Each injected `TxContext` argument has a unique location (and thus a unique root),
+/// so tracking them fully both permits the borrows to coexist and double-checks the Regex based
+/// implementation's laziness of omitting them from the borrow graph.
 /// Checks the following
 /// - Values are not used after being moved
 /// - Reference safety is upheld (no dangling references)
@@ -825,8 +851,11 @@ impl Context {
     #[allow(unused)]
     fn print(&self) {
         println!("Context {{");
-        println!("  tx_context: ");
-        self.tx_context.print();
+        println!("  tx_contexts: [");
+        for tx_context in &self.tx_contexts {
+            tx_context.print();
+        }
+        println!("  ],");
         println!("  gas: ");
         self.gas.print();
         println!("  object_inputs: [");
