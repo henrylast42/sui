@@ -114,7 +114,7 @@ use move_package_alt::{
 use move_symbol_pool::Symbol;
 use sui_keys::key_derive;
 use sui_package_alt::{BuildParams, SuiFlavor, find_environment};
-use sui_source_verification::verify_source;
+use sui_source_verification::{verify_built, verify_source};
 use tracing::{debug, info};
 
 /// Concurrency level for fetching coin metadata for balances.
@@ -637,6 +637,12 @@ pub enum SuiClientCommands {
         /// reading it from the package's publish metadata.
         #[clap(long)]
         toolchain_version: Option<String>,
+
+        /// Compare the modules already compiled under `<package_path>/build` against the on-chain
+        /// package with this id, without rebuilding. Only module bytecode is compared, not linkage.
+        /// Intended for tooling such as the debugger.
+        #[clap(long, hide = true, value_name = "ON_CHAIN_ID")]
+        verify_only: Option<ObjectID>,
     },
 
     /// Remove an existing address by its alias or hexadecimal string.
@@ -1833,41 +1839,49 @@ impl SuiClientCommands {
                 package_path,
                 build_config,
                 toolchain_version,
+                verify_only,
             } => {
-                // Resolve the environment the way the rest of the CLI does, and read the address and
-                // toolchain from the package's own publication, so they are exactly what the package
-                // system would resolve when linking against this package.
-                let environment = find_environment(
-                    &package_path,
-                    build_config.environment.clone(),
-                    context,
-                    false,
-                )
-                .await?;
+                if let Some(on_chain_id) = verify_only {
+                    // Compare the existing build against a caller-supplied on-chain id, without
+                    // rebuilding.
+                    let client = context.grpc_client()?;
+                    verify_built(&package_path, on_chain_id, &client).await?;
+                } else {
+                    // Resolve the environment the way the rest of the CLI does, and read the address
+                    // and toolchain from the package's own publication, so they are exactly what the
+                    // package system would resolve when linking against this package.
+                    let environment = find_environment(
+                        &package_path,
+                        build_config.environment.clone(),
+                        context,
+                        false,
+                    )
+                    .await?;
 
-                let flavor = SuiFlavor::with_client(context);
-                let publication =
-                    read_publication::<SuiFlavor>(&package_path, &environment, &flavor)
-                        .await?
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "package at {} records no publication for environment `{}`; \
-                             nothing to verify against",
-                                package_path.display(),
-                                environment.name(),
-                            )
-                        })?;
+                    let flavor = SuiFlavor::with_client(context);
+                    let publication =
+                        read_publication::<SuiFlavor>(&package_path, &environment, &flavor)
+                            .await?
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "package at {} records no publication for environment `{}`; \
+                                     nothing to verify against",
+                                    package_path.display(),
+                                    environment.name(),
+                                )
+                            })?;
 
-                let client = context.grpc_client()?;
-                verify_source(
-                    &package_path,
-                    &publication,
-                    toolchain_version,
-                    &environment,
-                    &client,
-                    Some(context.config.path()),
-                )
-                .await?;
+                    let client = context.grpc_client()?;
+                    verify_source(
+                        &package_path,
+                        &publication,
+                        toolchain_version,
+                        &environment,
+                        &client,
+                        Some(context.config.path()),
+                    )
+                    .await?;
+                }
 
                 SuiClientCommandResult::VerifySource
             }
