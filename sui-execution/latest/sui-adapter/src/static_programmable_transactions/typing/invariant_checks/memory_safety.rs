@@ -296,7 +296,7 @@ impl Location {
 }
 
 impl Context {
-    fn new<Mode: ExecutionMode>(_env: &Env<Mode>, txn: &T::Transaction) -> anyhow::Result<Self> {
+    fn new<Mode: ExecutionMode>(env: &Env<Mode>, txn: &T::Transaction) -> anyhow::Result<Self> {
         let T::Transaction {
             gas_payment,
             bytes: _,
@@ -316,6 +316,14 @@ impl Context {
                 _ => None,
             })
             .max();
+        // Translation mints a unique TxContext location per injection only when references are
+        // allowed in PTBs; without the flag, every injection must use index 0.
+        if !env.protocol_config.allow_references_in_ptbs() && max_tx_context.unwrap_or(0) != 0 {
+            anyhow::bail!(
+                "TxContext location index {} minted without allow_references_in_ptbs",
+                max_tx_context.unwrap_or(0)
+            );
+        }
         let num_tx_contexts = match max_tx_context {
             None => 0,
             Some(max) => max
@@ -578,7 +586,10 @@ impl Context {
 /// Unlike the Regex based implementation, this implementation does not special case `TxContext`
 /// borrows. Each injected `TxContext` argument has a unique location (and thus a unique root),
 /// so tracking them fully both permits the borrows to coexist and double-checks the Regex based
-/// implementation's laziness of omitting them from the borrow graph.
+/// implementation's laziness of omitting them from the borrow graph. When
+/// `allow_references_in_ptbs` is off, translation reuses index 0 for every injection
+/// (`Context::new` enforces this), so all `TxContext` borrows share a single root and are checked
+/// exactly as before the flag existed.
 /// Checks the following
 /// - Values are not used after being moved
 /// - Reference safety is upheld (no dangling references)
