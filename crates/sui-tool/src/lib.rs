@@ -881,7 +881,9 @@ pub async fn download_formal_snapshot(
     let (_abort_handle, abort_registration) = AbortHandle::new_pair();
     let perpetual_db_clone = perpetual_db.clone();
     let snapshot_dir = path.parent().unwrap().join("snapshot");
-    if snapshot_dir.exists() {
+    // Reuse previously downloaded .ref files instead of wiping + re-downloading them.
+    let reuse_download = std::env::var_os("SUI_REUSE_SNAPSHOT_DOWNLOAD").is_some();
+    if snapshot_dir.exists() && !reuse_download {
         fs::remove_dir_all(snapshot_dir.clone())?;
     }
     let snapshot_dir_clone = snapshot_dir.clone();
@@ -903,7 +905,7 @@ pub async fn download_formal_snapshot(
             &local_store_config,
             NonZeroUsize::new(num_parallel_downloads).unwrap(),
             m_clone,
-            false, // skip_reset_local_store
+            reuse_download, // skip_reset_local_store (reuse existing .ref download when set)
             max_retries,
             num_parallel_chunks,
         )
