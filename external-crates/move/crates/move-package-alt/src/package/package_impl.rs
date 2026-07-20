@@ -80,8 +80,10 @@ pub async fn read_publication<F: MoveFlavor>(
 ) -> PackageResult<Option<Publication<F>>> {
     let path = PackagePath::new(dir.to_path_buf())?;
     let mtx = path.lock()?;
+    // This reads recorded metadata for a package the caller may not own (for example, verifying
+    // someone else's published source), so it must not emit advice about that package's manifest.
     let (_, _, publication) =
-        Package::<F>::read_manifest_and_publication(&path, env, true, &mtx, flavor).await?;
+        Package::<F>::read_manifest_and_publication(&path, env, false, &mtx, flavor).await?;
     Ok(publication)
 }
 
@@ -217,17 +219,20 @@ impl<F: MoveFlavor> Package<F> {
     /// Read the manifest for the (already-fetched) package at `path` and the publication recorded
     /// for `env` — from the modern pubfile, falling back to a legacy lockfile — without resolving
     /// the dependency graph. Shared by [`Self::load`] and [`read_publication`].
+    ///
+    /// `display_warnings` enables user-facing advice about the package's manifest (such as
+    /// redundant implicit dependencies); pass it only when loading a package the caller authors.
     async fn read_manifest_and_publication(
         path: &PackagePath,
         env: &Environment,
-        is_root: bool,
+        display_warnings: bool,
         mtx: &PackageSystemLock,
         flavor: &F,
     ) -> PackageResult<(FileHandle, ParsedManifest, Option<Publication<F>>)> {
         // try to load a legacy manifest (with an `[addresses]` section)
         //   - if it fails, load a modern manifest (and return any errors)
         let legacy_manifest = path
-            .read_legacy_manifest::<F>(env, is_root, mtx, flavor)
+            .read_legacy_manifest::<F>(env, display_warnings, mtx, flavor)
             .await?;
         let (file_handle, manifest) = if let Some(result) = legacy_manifest {
             result
@@ -622,8 +627,6 @@ mod tests {
         PackageName::new(name.to_string()).unwrap()
     }
 
-    /// Create a basic package and then call cache_package on a local dependency to it; check that
-    /// the returned fields are correct
     /// `read_publication` returns the addresses a package recorded, without building its graph.
     #[test(tokio::test)]
     async fn read_publication_returns_recorded_addresses() {
@@ -744,6 +747,8 @@ mod tests {
         assert!(publication.is_none());
     }
 
+    /// Create a basic package and then call cache_package on a local dependency to it; check that
+    /// the returned fields are correct
     #[test(tokio::test)]
     async fn test_cache_package() {
         let scenario = TestPackageGraph::new(["root"])
