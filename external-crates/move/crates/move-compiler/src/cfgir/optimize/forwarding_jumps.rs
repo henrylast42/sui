@@ -35,8 +35,7 @@ use crate::{
     },
     diagnostics::DiagnosticReporter,
     expansion::ast::Mutability,
-    hlir::ast::{Command, Command_, FunctionSignature, Label, SingleType, Value, Var},
-    parser::ast::ConstantName,
+    hlir::ast::{Command, Command_, FunctionSignature, Label, SingleType, Var},
     shared::unique_map::UniqueMap,
 };
 
@@ -47,7 +46,7 @@ pub fn optimize(
     _reporter: &DiagnosticReporter,
     _signature: &FunctionSignature,
     _locals: &UniqueMap<Var, (Mutability, SingleType)>,
-    _constants: &UniqueMap<ConstantName, Value>,
+    _constants: &super::ConstantValues,
     cfg: &mut MutForwardCFG,
 ) -> bool {
     let changed = optimize_(cfg.blocks_mut());

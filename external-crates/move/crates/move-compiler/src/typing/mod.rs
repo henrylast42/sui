@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod ast;
+mod constant_getters;
 pub mod core;
 mod dependency_ordering;
 mod deprecation_warnings;

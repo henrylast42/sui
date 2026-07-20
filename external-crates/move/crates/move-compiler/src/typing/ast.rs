@@ -114,6 +114,10 @@ pub struct Constant {
     pub loc: Loc,
     pub signature: Type,
     pub value: Exp,
+    /// The synthesized `public(package)` getter function for cross-module access, if this
+    /// constant needs one. Set after typing, once macros have been expanded (see
+    /// `constant_getters`).
+    pub getter_name: Option<FunctionName>,
 }
 
 //**************************************************************************************************
@@ -574,11 +578,15 @@ impl AstDebug for (ConstantName, &Constant) {
                 loc: _loc,
                 signature,
                 value,
+                getter_name,
             },
         ) = self;
         doc.ast_debug(w);
         warning_filter.ast_debug(w);
         attributes.ast_debug(w);
+        if let Some(getter) = getter_name {
+            w.writeln(format!("getter: {getter}"));
+        }
         w.write(format!("const#{index} {name}:"));
         signature.ast_debug(w);
         w.write(" = ");

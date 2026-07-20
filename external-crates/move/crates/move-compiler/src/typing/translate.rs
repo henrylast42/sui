@@ -34,6 +34,7 @@ use crate::{
     sui_mode,
     typing::{
         ast::{self as T},
+        constant_getters,
         core::{
             self, Context, ModuleContext, PublicForTesting, ResolvedFunctionType, Subst,
             global_use_funs, public_testing_visibility, report_visibility_error,
@@ -69,6 +70,9 @@ pub fn program(
     let all_macro_definitions = extract_macros(compilation_env, &nmodules, &pre_compiled_lib);
     let mut modules = modules(compilation_env, &mut info, &all_macro_definitions, nmodules);
 
+    // must run after macro expansion (a macro body's constant reference can expand into another
+    // module) and before program info construction
+    constant_getters::program(compilation_env, &mut modules);
     dependency_ordering::program(compilation_env, &mut modules);
     recursive_datatypes::modules(compilation_env, &modules);
     infinite_instantiations::modules(compilation_env, &modules);
@@ -631,6 +635,7 @@ fn constant(context: &mut Context, _name: ConstantName, nconstant: N::Constant) 
         loc,
         signature,
         value: *value,
+        getter_name: None,
     }
 }
 
@@ -4324,6 +4329,21 @@ fn annotated_error_const(context: &mut Context, e: &mut T::Exp, abort_or_assert_
                 )));
                 return;
             };
+            // The error constant's name and value are encoded in the abort code as indices into
+            // the aborting module's tables, so the constant must come from the current module.
+            if !context.is_current_module(module_ident) {
+                let msg = format!(
+                    "Invalid use of '#[error]' constant '{}::{}' in {}",
+                    module_ident, constant_name, abort_or_assert_str
+                );
+                let defined_msg =
+                    "'#[error]' constants can only be used in the module that defines them";
+                context.add_diag(diag!(
+                    TypeSafety::InvalidErrorUsage,
+                    (*const_loc, msg),
+                    (defined_loc, defined_msg)
+                ));
+            }
             let econst = T::UnannotatedExp_::ErrorConstant {
                 line_number_loc: *const_loc,
                 error_constant: Some(*constant_name),

@@ -138,6 +138,12 @@ pub(super) struct Context<'env> {
     pub(super) debug: HLIRDebugFlags,
     pub reporter: DiagnosticReporter<'env>,
     current_package: Option<Symbol>,
+    current_module: Option<ModuleIdent>,
+    /// true while translating a constant's value, where cross-module constant references are
+    /// left in place for constant folding rather than rewritten to getter calls
+    translating_constant: bool,
+    /// getters for constants used cross-module, synthesized at the end of typing
+    constant_getters: BTreeMap<(ModuleIdent, ConstantName), FunctionName>,
     function_locals: UniqueMap<H::Var, (Mutability, H::SingleType)>,
     signature: Option<H::FunctionSignature>,
     tmp_counter: usize,
@@ -157,12 +163,27 @@ impl<'env> Context<'env> {
             match_specialization: false,
         };
         let reporter = env.diagnostic_reporter_at_top_level();
+        let constant_getters = prog
+            .modules
+            .key_cloned_iter()
+            .flat_map(|(mident, mdef)| {
+                mdef.constants
+                    .key_cloned_iter()
+                    .filter_map(move |(cname, cdef)| {
+                        let getter = cdef.getter_name?;
+                        Some(((mident, cname), getter))
+                    })
+            })
+            .collect();
         Context {
             env,
             reporter,
             info: prog.info.clone(),
             debug,
             current_package: None,
+            current_module: None,
+            translating_constant: false,
+            constant_getters,
             function_locals: UniqueMap::new(),
             signature: None,
             tmp_counter: 0,
@@ -365,6 +386,7 @@ fn module(
         constants: tconstants,
     } = mdef;
     context.current_package = package_name;
+    context.current_module = Some(module_ident);
     context.push_warning_filter_scope(warning_filter.clone());
     let structs = tstructs.map(|name, s| struct_def(context, name, s));
     let enums = tenums.map(|name, s| enum_def(context, name, s));
@@ -381,6 +403,7 @@ fn module(
     gen_unused_warnings(context, target_kind, &structs);
 
     context.current_package = None;
+    context.current_module = None;
     context.pop_warning_filter_scope();
     (
         module_ident,
@@ -529,6 +552,7 @@ fn constant(context: &mut Context, _name: ConstantName, cdef: T::Constant) -> H:
         loc,
         signature: tsignature,
         value: tvalue,
+        getter_name: _,
     } = cdef;
     context.push_warning_filter_scope(warning_filter.clone());
     let signature = base_type(&context.reporter, &tsignature);
@@ -543,7 +567,9 @@ fn constant(context: &mut Context, _name: ConstantName, cdef: T::Constant) -> H:
         parameters: vec![],
         return_type: H::Type_::base(signature.clone()),
     };
+    context.translating_constant = true;
     let (locals, body) = function_body_defined(context, &function_signature, loc, tseq);
+    context.translating_constant = false;
     context.pop_warning_filter_scope();
     H::Constant {
         warning_filter,
@@ -1468,7 +1494,30 @@ fn value(
             make_exp(new_unit)
         }
         E::Value(ev) => make_exp(HE::Value(process_value(context, ev))),
-        E::Constant(_m, c) => make_exp(HE::Constant(c)), // only private constants (for now)
+        E::Constant(m, c) => {
+            // Inside constant definitions, cross-module references are resolved by constant
+            // folding; in function bodies they are compiled as calls to the getter function
+            // synthesized in the defining module.
+            if context.translating_constant || context.current_module == Some(m) {
+                make_exp(HE::Constant(m, c))
+            } else if let Some(getter) = context.constant_getters.get(&(m, c)).copied() {
+                make_exp(HE::ModuleCall(Box::new(H::ModuleCall {
+                    module: m,
+                    name: getter,
+                    type_arguments: vec![],
+                    arguments: vec![],
+                })))
+            } else {
+                // reachable only when typing rejected the access (feature off or cross-package)
+                if !context.env.has_errors() {
+                    context.add_diag(ice!((
+                        eloc,
+                        "cross-module constant use with no synthesized getter"
+                    )));
+                }
+                make_exp(HE::UnresolvedError)
+            }
+        }
         E::ErrorConstant {
             line_number_loc,
             error_constant,

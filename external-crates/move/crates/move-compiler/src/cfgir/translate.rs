@@ -8,6 +8,7 @@ use crate::{
         self,
         ast::{self as G, BasicBlock, BasicBlocks, BlockInfo},
         cfg::{ImmForwardCFG, MutForwardCFG},
+        optimize::ConstantValues,
         visitor::{CFGIRVisitor, CFGIRVisitorConstructor, CFGIRVisitorContext},
     },
     diag,
@@ -199,14 +200,20 @@ fn modules(
     context: &mut Context,
     hmodules: UniqueMap<ModuleIdent, H::ModuleDefinition>,
 ) -> UniqueMap<ModuleIdent, G::ModuleDefinition> {
+    // Process modules in dependency order so that a constant's cross-module dependencies are
+    // already evaluated when the constant is folded.
+    let mut hmodules = hmodules.into_iter().collect::<Vec<_>>();
+    hmodules.sort_by_key(|(_, mdef)| mdef.dependency_order);
+    let mut constant_values = ConstantValues::new();
     let modules = hmodules
         .into_iter()
-        .map(|(mname, m)| module(context, mname, m));
+        .map(|(mname, m)| module(context, &mut constant_values, mname, m));
     UniqueMap::maybe_from_iter(modules).unwrap()
 }
 
 fn module(
     context: &mut Context,
+    constant_values: &mut ConstantValues,
     module_ident: ModuleIdent,
     mdef: H::ModuleDefinition,
 ) -> (ModuleIdent, G::ModuleDefinition) {
@@ -224,7 +231,7 @@ fn module(
     } = mdef;
     context.current_package = package_name;
     context.push_warning_filter_scope(warning_filter.clone());
-    let constants = constants(context, module_ident, hconstants);
+    let constants = constants(context, constant_values, module_ident, hconstants);
     let functions = hfunctions.map(|name, f| function(context, module_ident, name, f));
     context.pop_warning_filter_scope();
     context.current_package = None;
@@ -251,6 +258,7 @@ fn module(
 
 fn constants(
     context: &mut Context,
+    constant_values: &mut ConstantValues,
     module: ModuleIdent,
     mut consts: UniqueMap<ConstantName, H::Constant>,
 ) -> UniqueMap<ConstantName, G::Constant> {
@@ -260,10 +268,10 @@ fn constants(
     for (name, constant) in consts.key_cloned_iter() {
         let deps = dependent_constants(constant);
         graph.add_node(name);
-        for dep in deps {
-            // Only add edges for constants defined in this module; cross-module constants
-            // are already resolved and don't need dependency tracking here.
-            if consts.contains_key(&dep) {
+        for (dep_module, dep) in deps {
+            // Only add edges for constants defined in this module; cross-module dependencies
+            // are satisfied by processing modules in dependency order.
+            if dep_module == module && consts.contains_key(&dep) {
                 graph.add_edge(dep, name, ());
             }
         }
@@ -344,10 +352,9 @@ fn constants(
         .collect();
 
     let mut out_map = UniqueMap::new();
-    let mut constant_values = UniqueMap::new();
     for constant_name in sorted.into_iter() {
         let cdef = consts.remove(&constant_name).unwrap();
-        let new_cdef = constant(context, &mut constant_values, module, constant_name, cdef);
+        let new_cdef = constant(context, constant_values, module, constant_name, cdef);
         out_map
             .add(constant_name, new_cdef)
             .expect("ICE constant name collision");
@@ -356,8 +363,8 @@ fn constants(
     out_map
 }
 
-fn dependent_constants(constant: &H::Constant) -> BTreeSet<ConstantName> {
-    fn dep_exp(set: &mut BTreeSet<ConstantName>, exp: &H::Exp) {
+fn dependent_constants(constant: &H::Constant) -> BTreeSet<(ModuleIdent, ConstantName)> {
+    fn dep_exp(set: &mut BTreeSet<(ModuleIdent, ConstantName)>, exp: &H::Exp) {
         use H::UnannotatedExp_ as E;
         match &exp.exp.value {
             E::UnresolvedError
@@ -377,14 +384,14 @@ fn dependent_constants(constant: &H::Constant) -> BTreeSet<ConstantName> {
                     dep_exp(set, arg);
                 }
             }
-            E::Constant(c) => {
-                set.insert(*c);
+            E::Constant(m, c) => {
+                set.insert((*m, *c));
             }
             _ => panic!("ICE typing should have rejected exp in const"),
         }
     }
 
-    fn dep_cmd(set: &mut BTreeSet<ConstantName>, command: &H::Command_) {
+    fn dep_cmd(set: &mut BTreeSet<(ModuleIdent, ConstantName)>, command: &H::Command_) {
         use H::Command_ as C;
         match command {
             C::IgnoreAndPop { exp, .. } => dep_exp(set, exp),
@@ -402,7 +409,7 @@ fn dependent_constants(constant: &H::Constant) -> BTreeSet<ConstantName> {
         }
     }
 
-    fn dep_stmt(set: &mut BTreeSet<ConstantName>, stmt: &H::Statement_) {
+    fn dep_stmt(set: &mut BTreeSet<(ModuleIdent, ConstantName)>, stmt: &H::Statement_) {
         use H::Statement_ as S;
         match stmt {
             S::Command(cmd) => dep_cmd(set, &cmd.value),
@@ -439,7 +446,7 @@ fn dependent_constants(constant: &H::Constant) -> BTreeSet<ConstantName> {
         }
     }
 
-    fn dep_block(set: &mut BTreeSet<ConstantName>, block: &H::Block) {
+    fn dep_block(set: &mut BTreeSet<(ModuleIdent, ConstantName)>, block: &H::Block) {
         for entry in block {
             dep_stmt(set, &entry.value);
         }
@@ -453,7 +460,7 @@ fn dependent_constants(constant: &H::Constant) -> BTreeSet<ConstantName> {
 
 fn constant(
     context: &mut Context,
-    constant_values: &mut UniqueMap<ConstantName, Value>,
+    constant_values: &mut ConstantValues,
     module: ModuleIdent,
     name: ConstantName,
     c: H::Constant,
@@ -484,9 +491,7 @@ fn constant(
             exp: sp!(_, H::UnannotatedExp_::Value(value)),
             ..
         }) => {
-            constant_values
-                .add(name, value.clone())
-                .expect("ICE constant name collision");
+            constant_values.add(module, name, value.clone());
             Some(move_value_from_value(value))
         }
         _ => None,
@@ -508,7 +513,7 @@ const CANNOT_FOLD: &str =
 
 fn constant_(
     context: &mut Context,
-    constant_values: &UniqueMap<ConstantName, Value>,
+    constant_values: &ConstantValues,
     module: ModuleIdent,
     name: ConstantName,
     full_loc: Loc,
@@ -734,7 +739,7 @@ fn function_body(
                     context.current_package,
                     signature,
                     &locals,
-                    &UniqueMap::new(),
+                    &ConstantValues::new(),
                     &mut cfg,
                 );
                 if context.debug.print_optimized_blocks {

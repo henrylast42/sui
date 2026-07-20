@@ -8,10 +8,10 @@ use crate::{
     expansion::ast::Mutability,
     hlir::ast::{
         BaseType, BaseType_, Command, Command_, Exp, FunctionSignature, SingleType, TypeName,
-        TypeName_, UnannotatedExp_, Value, Value_, Var,
+        TypeName_, UnannotatedExp_, Value_, Var,
     },
     naming::ast::{BuiltinTypeName, BuiltinTypeName_},
-    parser::ast::{BinOp, BinOp_, ConstantName, UnaryOp, UnaryOp_},
+    parser::ast::{BinOp, BinOp_, UnaryOp, UnaryOp_},
     shared::unique_map::UniqueMap,
 };
 use move_ir_types::location::*;
@@ -23,7 +23,7 @@ pub fn optimize(
     reporter: &DiagnosticReporter,
     _signature: &FunctionSignature,
     _locals: &UniqueMap<Var, (Mutability, SingleType)>,
-    constants: &UniqueMap<ConstantName, Value>,
+    constants: &super::ConstantValues,
     cfg: &mut MutForwardCFG,
 ) -> bool {
     let context = Context {
@@ -53,7 +53,7 @@ pub fn optimize(
 struct Context<'a> {
     #[allow(dead_code)]
     reporter: &'a DiagnosticReporter<'a>,
-    constants: &'a UniqueMap<ConstantName, Value>,
+    constants: &'a super::ConstantValues,
 }
 
 //**************************************************************************************************
@@ -108,11 +108,11 @@ fn optimize_exp(context: &Context, e: &mut Exp) -> bool {
         | E::ErrorConstant { .. }
         | E::Unreachable => false,
 
-        e_ @ E::Constant(_) => {
-            let E::Constant(name) = e_ else {
+        e_ @ E::Constant(_, _) => {
+            let E::Constant(module, name) = e_ else {
                 unreachable!()
             };
-            if let Some(value) = context.constants.get(name) {
+            if let Some(value) = context.constants.get(module, name) {
                 *e_ = E::Value(value.clone());
                 true
             } else {

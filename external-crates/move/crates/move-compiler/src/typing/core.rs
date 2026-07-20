@@ -1967,14 +1967,30 @@ pub fn make_constant_type(
         (*defined_loc, signature.clone())
     };
     if !in_current_module {
-        let msg = format!("Invalid access of '{}::{}'", m, c);
-        let internal_msg = "Constants are internal to their module, and cannot can be accessed \
-                            outside of their module";
-        context.add_diag(diag!(
-            TypeSafety::Visibility,
-            (loc, msg),
-            (defined_loc, internal_msg)
-        ));
+        let supports_cross_module = context
+            .env()
+            .supports_feature(context.current_package(), FeatureGate::CrossModuleConstants);
+        if !supports_cross_module {
+            let msg = format!("Invalid access of '{}::{}'", m, c);
+            let internal_msg = "Constants are internal to their module, and cannot can be \
+                                accessed outside of their module";
+            context.add_diag(diag!(
+                TypeSafety::Visibility,
+                (loc, msg),
+                (defined_loc, internal_msg)
+            ));
+        } else if context.module_info(m).package != context.current_package() {
+            // constants are accessed cross-module via `public(package)` getter functions, so
+            // they cannot be referenced outside of their package
+            let msg = format!("Invalid access of '{}::{}'", m, c);
+            let internal_msg = "Constants are internal to their package, and cannot be accessed \
+                                outside of their package";
+            context.add_diag(diag!(
+                TypeSafety::Visibility,
+                (loc, msg),
+                (defined_loc, internal_msg)
+            ));
+        }
     }
 
     signature

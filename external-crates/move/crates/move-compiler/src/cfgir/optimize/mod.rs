@@ -10,21 +10,46 @@ mod simplify_jumps;
 use move_proc_macros::growing_stack;
 use move_symbol_pool::Symbol;
 
+use std::collections::BTreeMap;
+
 use crate::{
     cfgir::cfg::MutForwardCFG,
     diagnostics::DiagnosticReporter,
     editions::FeatureGate,
-    expansion::ast::Mutability,
+    expansion::ast::{ModuleIdent, Mutability},
     hlir::ast::*,
     parser::ast::ConstantName,
     shared::{CompilationEnv, unique_map::UniqueMap},
 };
 
+/// The values of constants that have already been evaluated, accumulated across modules as they
+/// are processed in dependency order.
+#[derive(Default)]
+pub struct ConstantValues(BTreeMap<ModuleIdent, UniqueMap<ConstantName, Value>>);
+
+impl ConstantValues {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub fn get(&self, module: &ModuleIdent, name: &ConstantName) -> Option<&Value> {
+        self.0.get(module).and_then(|consts| consts.get(name))
+    }
+
+    pub fn add(&mut self, module: ModuleIdent, name: ConstantName, value: Value) {
+        self.0
+            .entry(module)
+            .or_default()
+            .add(name, value)
+            .expect("ICE constant name collision");
+    }
+}
+
 pub type Optimization = fn(
     &DiagnosticReporter,
     &FunctionSignature,
     &UniqueMap<Var, (Mutability, SingleType)>,
-    &UniqueMap<ConstantName, Value>,
+    &ConstantValues,
     &mut MutForwardCFG,
 ) -> bool;
 
@@ -50,7 +75,7 @@ pub fn optimize(
     package: Option<Symbol>,
     signature: &FunctionSignature,
     locals: &UniqueMap<Var, (Mutability, SingleType)>,
-    constants: &UniqueMap<ConstantName, Value>,
+    constants: &ConstantValues,
     cfg: &mut MutForwardCFG,
 ) {
     let mut count = 0;
