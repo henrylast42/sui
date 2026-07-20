@@ -1764,13 +1764,15 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
         previously_deferred_tx_digests: &HashMap<TransactionDigest, DeferralKey>,
         execution_time_estimator: &ExecutionTimeEstimator,
     ) {
+        let tx_digest = *transaction.tx().digest();
+
         // Check for unpaid amplification before other deferral checks.
         // SIP-45: Paid amplification allows (gas_price / RGP + 1) submissions.
         // Transactions with more duplicates than paid for are deferred.
         if protocol_config.defer_unpaid_amplification() {
             let occurrence_count = state
                 .occurrence_counts
-                .get(transaction.tx().digest())
+                .get(&tx_digest)
                 .copied()
                 .unwrap_or(0);
 
@@ -1784,7 +1786,7 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
                     .inc();
 
                 let deferred_from_round = previously_deferred_tx_digests
-                    .get(transaction.tx().digest())
+                    .get(&tx_digest)
                     .map(|k| k.deferred_from_round())
                     .unwrap_or(commit_info.round);
 
@@ -1800,9 +1802,7 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
                     assert_reachable!("unpaid amplification deferral");
                     debug!(
                         "Deferring transaction {:?} due to unpaid amplification (count={}, allowed={})",
-                        transaction.tx().digest(),
-                        occurrence_count,
-                        allowed_count
+                        tx_digest, occurrence_count, allowed_count
                     );
                     deferred_txns
                         .entry(deferral_key)
@@ -1816,10 +1816,7 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
         // Check for owned object double-spend: if this transaction won an owned object
         // lock while another transaction in the same commit tried to lock the same object,
         // defer it as a penalty.
-        if let Some(conflict_info) = state
-            .contested_transaction_digests
-            .get(transaction.tx().digest())
-        {
+        if let Some(conflict_info) = state.contested_transaction_digests.get(&tx_digest) {
             self.metrics.consensus_handler_double_spend_deferrals.inc();
             self.metrics
                 .consensus_handler_double_spend_conflict_count
@@ -1841,7 +1838,7 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
 
             if protocol_config.defer_owned_object_double_spend() {
                 let deferred_from_round = previously_deferred_tx_digests
-                    .get(transaction.tx().digest())
+                    .get(&tx_digest)
                     .map(|k| k.deferred_from_round())
                     .unwrap_or(commit_info.round);
 
@@ -1857,7 +1854,7 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
                     debug!(
                         "Deferring transaction {:?} due to owned object double-spend contention \
                         (gas_conflicts={}, non_gas_conflicts={})",
-                        transaction.tx().digest(),
+                        tx_digest,
                         conflict_info.gas_object_conflicts,
                         conflict_info.non_gas_object_conflicts,
                     );
@@ -1891,8 +1888,7 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
         if let Some((deferral_key, deferral_reason)) = deferral_info {
             debug!(
                 "Deferring consensus certificate for transaction {:?} until {:?}",
-                transaction.tx().digest(),
-                deferral_key
+                tx_digest, deferral_key
             );
 
             match deferral_reason {
@@ -1925,12 +1921,10 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
                         // Cancel the transaction that has been deferred for too long.
                         debug!(
                             "Cancelling consensus transaction {:?} with deferral key {:?} due to congestion on objects {:?}",
-                            transaction.tx().digest(),
-                            deferral_key,
-                            congested_objects
+                            tx_digest, deferral_key, congested_objects
                         );
                         cancelled_txns.insert(
-                            *transaction.tx().digest(),
+                            tx_digest,
                             CancelConsensusCertificateReason::CongestionOnObjects(
                                 congested_objects,
                             ),
@@ -2810,7 +2804,7 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
                         ) {
                         Ok(new_locks) => {
                             owned_object_locks.extend(new_locks.into_iter());
-                            lock_holder_authors.insert(*tx.digest(), author);
+                            lock_holder_authors.entry(*tx.digest()).or_insert(author);
                             // Lock acquisition succeeded - now set Finalized status
                             status_updates.push((position, ConsensusTxStatus::Finalized));
                             num_finalized_user_transactions[author] += 1;

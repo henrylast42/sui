@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +20,8 @@ use sui_types::messages_consensus::ConsensusTransaction;
 use sui_types::object::Object;
 use sui_types::sui_system_state::epoch_start_sui_system_state::EpochStartSystemStateTrait;
 
+use sui_swarm_config::network_config_builder::ConfigBuilder;
+
 use crate::consensus_handler::ConsensusHandler;
 
 struct DoubleSpendTestSetup {
@@ -34,6 +37,14 @@ struct DoubleSpendTestSetup {
 
 impl DoubleSpendTestSetup {
     async fn new(protocol_config: ProtocolConfig, num_gas_objects: usize) -> Self {
+        Self::new_with_committee_size(protocol_config, num_gas_objects, 1).await
+    }
+
+    async fn new_with_committee_size(
+        protocol_config: ProtocolConfig,
+        num_gas_objects: usize,
+        committee_size: usize,
+    ) -> Self {
         let (sender, keypair): (_, AccountKeyPair) = deterministic_random_account_key();
 
         let gas_objects: Vec<Object> = (0..num_gas_objects)
@@ -44,8 +55,13 @@ impl DoubleSpendTestSetup {
         let mut genesis_objects = gas_objects.clone();
         genesis_objects.push(contested_object.clone());
 
-        let authority_state = TestAuthorityBuilder::new()
+        let network_config = ConfigBuilder::new_with_temp_dir()
+            .committee_size(NonZeroUsize::new(committee_size).unwrap())
             .with_reference_gas_price(1000)
+            .with_protocol_version(protocol_config.version)
+            .build();
+        let authority_state = TestAuthorityBuilder::new()
+            .with_shared_network_config(&network_config)
             .with_protocol_config(protocol_config)
             .build()
             .await;
@@ -185,6 +201,67 @@ async fn test_double_spend_detection_emits_metrics() {
             .get(),
         1,
         "Expected one double-spend loser attributed to author 0"
+    );
+}
+
+#[tokio::test]
+async fn test_duplicate_winner_preserves_first_author_attribution() {
+    telemetry_subscribers::init_for_testing();
+
+    let mut protocol_config =
+        ProtocolConfig::get_for_version(ProtocolVersion::max(), Chain::Unknown);
+    protocol_config.set_defer_owned_object_double_spend_for_testing(false);
+
+    let mut setup = DoubleSpendTestSetup::new_with_committee_size(protocol_config, 2, 3).await;
+    let mut consensus_txns = setup.build_competing_consensus_txns().await;
+    let loser = consensus_txns.pop().unwrap();
+    let winner = consensus_txns.pop().unwrap();
+    let transactions = vec![winner.clone(), winner, loser];
+
+    let count = setup
+        .submit_commit_and_count_scheduled(
+            TestConsensusCommit::new(transactions, 1, 0, 0).with_transaction_authors([0, 1, 2]),
+        )
+        .await;
+    assert_eq!(count, 2, "Expected prologue + deduplicated winner");
+
+    let consensus_committee = setup
+        .authority_state
+        .epoch_store_for_testing()
+        .epoch_start_state()
+        .get_consensus_committee();
+    let hostname = |author| {
+        consensus_committee
+            .authority(consensus_committee.to_authority_index(author).unwrap())
+            .hostname
+            .as_str()
+    };
+    assert_eq!(
+        setup
+            .metrics
+            .consensus_handler_double_spend_conflicting_authority
+            .with_label_values(&[hostname(0), "winner"])
+            .get(),
+        1,
+        "Expected winner attribution to remain with the first author"
+    );
+    assert_eq!(
+        setup
+            .metrics
+            .consensus_handler_double_spend_conflicting_authority
+            .with_label_values(&[hostname(1), "winner"])
+            .get(),
+        0,
+        "Expected duplicate author not to replace the first winner author"
+    );
+    assert_eq!(
+        setup
+            .metrics
+            .consensus_handler_double_spend_conflicting_authority
+            .with_label_values(&[hostname(2), "loser"])
+            .get(),
+        1,
+        "Expected loser attribution to use the loser's author"
     );
 }
 
