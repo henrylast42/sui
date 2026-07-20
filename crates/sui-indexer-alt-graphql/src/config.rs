@@ -43,6 +43,9 @@ pub struct RpcConfig {
 
     /// Configuration for the request-logging extension.
     pub logging: LoggingConfig,
+
+    /// Configuration for which pipelines this service can expect to find populated.
+    pub pipeline: PipelineConfig,
 }
 
 #[derive(Clone, Default, Debug, Deserialize, Serialize)]
@@ -55,6 +58,8 @@ pub struct RpcLayer {
     pub zklogin: ZkLoginLayer,
     pub subscription: SubscriptionLayer,
     pub logging: LoggingLayer,
+    pub pipeline_defaults: PipelineLayer,
+    pub pipeline: BTreeMap<String, PipelineLayer>,
 }
 
 #[derive(Clone)]
@@ -69,12 +74,22 @@ pub struct HealthLayer {
     pub max_checkpoint_lag_ms: Option<u64>,
 }
 
-/// Config for an indexer writing to a database used by this RPC service. It is simplified w.r.t.
-/// to the actual indexer config to focus on extracting the names of pipelines enabled on that
-/// indexer.
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
-pub struct IndexerConfig {
-    pub pipeline: toml::Table,
+/// Configuration for a single pipeline's `enabled` setting -- used both for the shared default
+/// (`[pipeline-defaults]`) and for per-pipeline overrides (`[pipeline.<name>]`). Kept as its own
+/// type/section rather than flattened together with the per-pipeline map: TOML forbids redefining
+/// the same key as both a scalar and a table, so if the default lived directly in the `[pipeline]`
+/// table, a pipeline named `enabled` could never be expressed, regardless of how the Rust side
+/// deserialized it.
+#[derive(Clone, Default, Debug, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct PipelineLayer {
+    pub enabled: Option<bool>,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct PipelineConfig {
+    /// Names of pipelines that are enabled.
+    pub enabled: BTreeSet<String>,
 }
 
 pub struct Limits {
@@ -346,6 +361,10 @@ impl RpcLayer {
             zklogin: ZkLoginConfig::default().into(),
             subscription: SubscriptionConfig::default().into(),
             logging: LoggingConfig::default().into(),
+            pipeline_defaults: PipelineLayer {
+                enabled: Some(true),
+            },
+            pipeline: BTreeMap::new(),
         }
     }
 
@@ -358,6 +377,11 @@ impl RpcLayer {
             zklogin: self.zklogin.finish(ZkLoginConfig::default()),
             subscription: self.subscription.finish(SubscriptionConfig::default()),
             logging: self.logging.finish(LoggingConfig::default()),
+            pipeline: finish_pipelines(
+                self.pipeline_defaults,
+                self.pipeline,
+                PipelineConfig::default(),
+            ),
         }
     }
 }
@@ -373,10 +397,10 @@ impl HealthLayer {
     }
 }
 
-impl IndexerConfig {
-    /// Pipelines detected as enabled in this indexer configuration.
+impl PipelineConfig {
+    /// Pipelines detected as enabled in this configuration.
     pub fn pipelines(&self) -> impl Iterator<Item = &str> {
-        self.pipeline.iter().map(|(k, _)| k.as_str())
+        self.enabled.iter().map(String::as_str)
     }
 }
 
@@ -712,4 +736,113 @@ fn max_across_protocol<T: Ord>(f: impl Fn(&ProtocolConfig) -> Option<T>) -> Opti
     }
 
     x
+}
+
+/// Resolve which pipelines are enabled, given a shared default and per-pipeline overrides.
+fn finish_pipelines(
+    defaults: PipelineLayer,
+    pipeline: BTreeMap<String, PipelineLayer>,
+    base: PipelineConfig,
+) -> PipelineConfig {
+    let default_enabled = defaults.enabled.unwrap_or(true);
+
+    let mut enabled = base.enabled;
+    enabled.extend(
+        pipeline
+            .into_iter()
+            .filter(|(_, entry)| entry.enabled.unwrap_or(default_enabled))
+            .map(|(name, _)| name),
+    );
+
+    PipelineConfig { enabled }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_default_enabled_applies_to_unset_entries() {
+        let layer: RpcLayer = toml::from_str(
+            r#"
+            [pipeline-defaults]
+            enabled = true
+
+            [pipeline.tx_calls]
+
+            [pipeline.kv_objects]
+            enabled = false
+
+            [pipeline.obj_versions]
+            "#,
+        )
+        .unwrap();
+
+        let config = layer.finish();
+        assert_eq!(
+            config.pipeline.pipelines().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["tx_calls", "obj_versions"]),
+        );
+    }
+
+    #[test]
+    fn pipeline_unlisted_is_never_enabled() {
+        let layer: RpcLayer = toml::from_str(
+            r#"
+            [pipeline-defaults]
+            enabled = true
+
+            [pipeline.tx_calls]
+            "#,
+        )
+        .unwrap();
+
+        let config = layer.finish();
+        assert_eq!(
+            config.pipeline.pipelines().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["tx_calls"]),
+        );
+        assert!(!config.pipeline.pipelines().any(|p| p == "kv_objects"));
+    }
+
+    #[test]
+    fn pipeline_missing_defaults_section_enables_listed_pipelines() {
+        let layer: RpcLayer = toml::from_str(
+            r#"
+            [pipeline.tx_calls]
+
+            [pipeline.kv_objects]
+            enabled = false
+            "#,
+        )
+        .unwrap();
+
+        let config = layer.finish();
+        assert_eq!(
+            config.pipeline.pipelines().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["tx_calls"]),
+        );
+    }
+
+    #[test]
+    fn pipeline_enabled_override_applies_despite_false_default() {
+        let layer: RpcLayer = toml::from_str(
+            r#"
+            [pipeline-defaults]
+            enabled = false
+
+            [pipeline.tx_calls]
+            enabled = true
+
+            [pipeline.kv_objects]
+            "#,
+        )
+        .unwrap();
+
+        let config = layer.finish();
+        assert_eq!(
+            config.pipeline.pipelines().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["tx_calls"]),
+        );
+    }
 }
