@@ -93,6 +93,15 @@ opt just that one out (or back in, if the default has been flipped to
 disabled). Pipelines that aren't listed at all are never considered enabled.
 See `examples/prod-config/graphql.toml` for an example.
 
+GraphQL also auto-discovers pipelines directly from the database's
+`watermarks` table at startup (any pipeline that has ever run has a row
+there), so pipelines don't strictly need to be listed in config to be picked
+up -- an auto-discovered pipeline is enabled by default, the same as a
+config-listed one. Explicit config always takes precedence over
+auto-discovery: a `[pipeline.<name>] enabled = false` entry (or a
+`[pipeline-defaults] enabled = false` default) still disables a pipeline even
+if it was auto-discovered.
+
 ## Running
 
 The service can be run with the following minimal command:

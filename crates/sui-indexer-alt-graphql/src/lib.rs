@@ -97,6 +97,7 @@ mod middleware;
 mod pagination;
 mod scope;
 mod task;
+pub use crate::task::pipeline_discovery::discover_pipelines;
 
 #[derive(clap::Args, Clone, Debug)]
 pub struct RpcArgs {

@@ -368,7 +368,7 @@ impl RpcLayer {
         }
     }
 
-    pub fn finish(self) -> RpcConfig {
+    pub fn finish(self, discovered_pipelines: Vec<String>) -> RpcConfig {
         RpcConfig {
             limits: self.limits.finish(Limits::default()),
             health: self.health.finish(HealthConfig::default()),
@@ -380,9 +380,20 @@ impl RpcLayer {
             pipeline: finish_pipelines(
                 self.pipeline_defaults,
                 self.pipeline,
+                discovered_pipelines,
                 PipelineConfig::default(),
             ),
         }
+    }
+
+    /// The resolved watermark polling interval, applying its default if not set. Exposed so
+    /// callers can reuse this interval before the whole layer is `finish`ed (e.g. as the retry
+    /// interval for pipeline discovery, which needs to run beforehand).
+    pub fn watermark_polling_interval(&self) -> Duration {
+        self.watermark
+            .clone()
+            .finish(WatermarkConfig::default())
+            .watermark_polling_interval
     }
 }
 
@@ -738,12 +749,21 @@ fn max_across_protocol<T: Ord>(f: impl Fn(&ProtocolConfig) -> Option<T>) -> Opti
     x
 }
 
-/// Resolve which pipelines are enabled, given a shared default and per-pipeline overrides.
+/// Resolve which pipelines are enabled, given a shared default, per-pipeline overrides, and
+/// pipelines discovered from the database. A discovered pipeline that the config doesn't already
+/// mention is treated as if it had been listed with no override of its own, so it's still subject
+/// to the shared default and can still be disabled by a subsequent config change -- config always
+/// takes precedence over auto-discovery.
 fn finish_pipelines(
     defaults: PipelineLayer,
-    pipeline: BTreeMap<String, PipelineLayer>,
+    mut pipeline: BTreeMap<String, PipelineLayer>,
+    discovered: Vec<String>,
     base: PipelineConfig,
 ) -> PipelineConfig {
+    for name in discovered {
+        pipeline.entry(name).or_default();
+    }
+
     let default_enabled = defaults.enabled.unwrap_or(true);
 
     let mut enabled = base.enabled;
@@ -778,7 +798,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = layer.finish();
+        let config = layer.finish(Vec::new());
         assert_eq!(
             config.pipeline.pipelines().collect::<BTreeSet<_>>(),
             BTreeSet::from(["tx_calls", "obj_versions"]),
@@ -797,7 +817,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = layer.finish();
+        let config = layer.finish(Vec::new());
         assert_eq!(
             config.pipeline.pipelines().collect::<BTreeSet<_>>(),
             BTreeSet::from(["tx_calls"]),
@@ -817,7 +837,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = layer.finish();
+        let config = layer.finish(Vec::new());
         assert_eq!(
             config.pipeline.pipelines().collect::<BTreeSet<_>>(),
             BTreeSet::from(["tx_calls"]),
@@ -839,7 +859,82 @@ mod tests {
         )
         .unwrap();
 
-        let config = layer.finish();
+        let config = layer.finish(Vec::new());
+        assert_eq!(
+            config.pipeline.pipelines().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["tx_calls"]),
+        );
+    }
+
+    #[test]
+    fn discovered_pipeline_enabled_by_default() {
+        let layer: RpcLayer = toml::from_str("").unwrap();
+
+        let config = layer.finish(vec!["tx_calls".to_string()]);
+        assert_eq!(
+            config.pipeline.pipelines().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["tx_calls"]),
+        );
+    }
+
+    #[test]
+    fn discovered_pipeline_disabled_by_config_override() {
+        let layer: RpcLayer = toml::from_str(
+            r#"
+            [pipeline.tx_calls]
+            enabled = false
+            "#,
+        )
+        .unwrap();
+
+        let config = layer.finish(vec!["tx_calls".to_string()]);
+        assert!(config.pipeline.pipelines().next().is_none());
+    }
+
+    #[test]
+    fn discovered_pipeline_respects_false_global_default() {
+        let layer: RpcLayer = toml::from_str(
+            r#"
+            [pipeline-defaults]
+            enabled = false
+            "#,
+        )
+        .unwrap();
+
+        let config = layer.finish(vec!["tx_calls".to_string()]);
+        assert!(config.pipeline.pipelines().next().is_none());
+    }
+
+    #[test]
+    fn discovered_pipeline_enabled_by_config_override() {
+        let layer: RpcLayer = toml::from_str(
+            r#"
+            [pipeline.tx_calls]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+
+        let config = layer.finish(vec!["tx_calls".to_string()]);
+        assert_eq!(
+            config.pipeline.pipelines().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["tx_calls"]),
+        );
+    }
+
+    #[test]
+    fn discovered_and_configured_pipelines_combine() {
+        let layer: RpcLayer = toml::from_str(
+            r#"
+            [pipeline.kv_objects]
+            enabled = false
+            "#,
+        )
+        .unwrap();
+
+        // kv_objects is configured (and disabled) but not discovered; tx_calls is discovered but
+        // not configured.
+        let config = layer.finish(vec!["tx_calls".to_string()]);
         assert_eq!(
             config.pipeline.pipelines().collect::<BTreeSet<_>>(),
             BTreeSet::from(["tx_calls"]),

@@ -8,9 +8,11 @@ use sui_futures::service::Error;
 use sui_indexer_alt_graphql::args::Args;
 use sui_indexer_alt_graphql::args::Command;
 use sui_indexer_alt_graphql::config::RpcLayer;
+use sui_indexer_alt_graphql::discover_pipelines;
 use sui_indexer_alt_graphql::start_rpc;
 use sui_indexer_alt_metrics::MetricsService;
 use sui_indexer_alt_metrics::uptime;
+use sui_indexer_alt_reader::pg_reader::PgReader;
 use telemetry_subscribers::TelemetryConfig;
 use tokio::fs;
 
@@ -56,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
             config,
             subscription_args,
         } => {
-            let rpc_config = if let Some(path) = config {
+            let layer = if let Some(path) = config {
                 let contents = fs::read_to_string(path)
                     .await
                     .context("Failed to read configuration TOML file")?;
@@ -64,14 +66,28 @@ async fn main() -> anyhow::Result<()> {
                 toml::from_str(&contents).context("Failed to parse configuration TOML file")?
             } else {
                 RpcLayer::default()
-            }
-            .finish();
-
-            let pg_pipelines: Vec<String> =
-                rpc_config.pipeline.pipelines().map(str::to_owned).collect();
+            };
 
             let registry = Registry::new_custom(Some("graphql_alt".into()), None)
                 .context("Failed to create Prometheus registry.")?;
+
+            let discovery_reader = PgReader::new(
+                Some("graphql_pipeline_discovery"),
+                Some(database_url.clone()),
+                db_args.clone(),
+                &registry,
+            )
+            .await
+            .context("Failed to set up database reader for pipeline discovery")?;
+
+            let retry_interval = layer.watermark_polling_interval();
+
+            let discovered_pipelines = discover_pipelines(&discovery_reader, retry_interval).await;
+
+            let rpc_config = layer.finish(discovered_pipelines);
+
+            let pg_pipelines: Vec<String> =
+                rpc_config.pipeline.pipelines().map(str::to_owned).collect();
 
             let metrics = MetricsService::new(metrics_args, registry);
 
