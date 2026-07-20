@@ -1079,6 +1079,13 @@ async fn backfill_epoch_transaction_digests(
         return Ok(());
     }
 
+    // gRPC-only nodes don't use the legacy JSON-RPC tx-digest index; allow skipping the
+    // brittle backfill so a checkpoint-fetch timeout can't abort an otherwise-complete restore.
+    if std::env::var_os("SUI_SKIP_TX_DIGEST_BACKFILL").is_some() {
+        info!("Skipping transaction digest backfill (SUI_SKIP_TX_DIGEST_BACKFILL set)");
+        return Ok(());
+    }
+
     // Use end_of_epoch_checkpoint_seq_nums to get checkpoint ranges
     // we're backfilling up to the last checkpoint of the previous epoch
     // end_of_epoch_checkpoint_seq_nums[890] == end of epoch checkpoint for epoch_891
