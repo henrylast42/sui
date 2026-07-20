@@ -1153,9 +1153,23 @@ async fn backfill_epoch_transaction_digests(
         .map(|sq| {
             let client = client.clone();
             async move {
-                fetch_checkpoint(&client, sq)
-                    .await
-                    .map(|c| Arc::new(CheckpointData::from(c)))
+                // Retry with backoff: during snapshot accumulation the CPU is saturated and the
+                // async reactor can't service HTTP in time; a bare fetch would abort the whole
+                // restore. Retry so the fetch simply waits out the CPU storm and completes later.
+                let mut attempt: u64 = 0;
+                loop {
+                    match fetch_checkpoint(&client, sq).await {
+                        Ok(c) => break Ok(Arc::new(CheckpointData::from(c))),
+                        Err(e) => {
+                            attempt += 1;
+                            if attempt >= 1000 {
+                                break Err(e);
+                            }
+                            tokio::time::sleep(Duration::from_millis((200 * attempt).min(30_000)))
+                                .await;
+                        }
+                    }
+                }
             }
         })
         .buffer_unordered(concurrency)
